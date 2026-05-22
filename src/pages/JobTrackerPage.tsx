@@ -1,5 +1,12 @@
 import { useEffect, useState, useRef } from "react";
-import { Briefcase, Plus, LayoutGrid, Table as TableIcon } from "lucide-react";
+import {
+  Briefcase,
+  Plus,
+  LayoutGrid,
+  Table as TableIcon,
+  Check,
+  ChevronsUpDown,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,6 +17,20 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useToast } from "@/hooks/use-toast";
 import { CreateJobApplicationInput, JobApplication, InterviewSession } from "@/lib/store";
+import { apiRequest } from "@/lib/api";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+} from "@/components/ui/command";
+
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   DndContext,
   DragOverlay,
@@ -35,6 +56,103 @@ import { CSS } from "@dnd-kit/utilities";
 
 const STATUSES = ["Applied", "Screening", "Interview", "Offer", "Rejected", "Ghosted"] as const;
 type Status = (typeof STATUSES)[number];
+const JOB_ROLES = [
+  "Software Engineer",
+  "Software Developer",
+  "Frontend Developer",
+  "Backend Developer",
+  "Full Stack Developer",
+  "Web Developer",
+  "Mobile App Developer",
+  "Android Developer",
+  "iOS Developer",
+  "React Developer",
+  "Next.js Developer",
+  "Node.js Developer",
+  "Java Developer",
+  "Python Developer",
+  "C++ Developer",
+  "PHP Developer",
+  "Ruby Developer",
+  "Go Developer",
+  "Rust Developer",
+  "Scala Developer",
+
+  "Data Analyst",
+  "Business Analyst",
+  "Data Scientist",
+  "Data Engineer",
+  "Machine Learning Engineer",
+  "AI Engineer",
+  "Deep Learning Engineer",
+  "NLP Engineer",
+  "Computer Vision Engineer",
+  "Research Engineer",
+
+  "DevOps Engineer",
+  "Cloud Engineer",
+  "Site Reliability Engineer",
+  "Platform Engineer",
+  "Infrastructure Engineer",
+  "Systems Engineer",
+
+  "Cybersecurity Analyst",
+  "Security Engineer",
+  "Security Consultant",
+  "Ethical Hacker",
+  "SOC Analyst",
+  "Network Security Engineer",
+
+  "QA Engineer",
+  "Test Engineer",
+  "Automation Test Engineer",
+  "Manual Tester",
+  "Performance Tester",
+
+  "UI Designer",
+  "UX Designer",
+  "UI/UX Designer",
+  "Product Designer",
+  "Graphic Designer",
+  "Interaction Designer",
+
+  "Product Manager",
+  "Project Manager",
+  "Program Manager",
+  "Technical Product Manager",
+  "Scrum Master",
+
+  "Database Administrator",
+  "Database Engineer",
+  "SQL Developer",
+
+  "Cloud Architect",
+  "Solutions Architect",
+  "Enterprise Architect",
+
+  "Network Engineer",
+  "System Administrator",
+  "IT Support Engineer",
+  "Help Desk Engineer",
+
+  "Blockchain Developer",
+  "Game Developer",
+  "AR/VR Developer",
+  "Embedded Engineer",
+  "Firmware Engineer",
+  "IoT Engineer",
+
+  "Technical Writer",
+  "Consultant",
+  "Technology Analyst",
+
+  "Intern",
+  "Software Engineering Intern",
+  "Data Analyst Intern",
+  "Machine Learning Intern",
+  "Frontend Intern",
+  "Backend Intern",
+];
 
 const statusColor: Record<string, string> = {
   Applied: "bg-primary/20 text-primary border-primary/30",
@@ -43,6 +161,30 @@ const statusColor: Record<string, string> = {
   Offer: "bg-success/20 text-success border-success/30",
   Rejected: "bg-destructive/20 text-destructive border-destructive/30",
   Ghosted: "bg-muted text-muted-foreground border-border",
+};
+const isValidCompany = (name: string) => {
+  const trimmed = name.trim();
+
+  if (trimmed.length < 2) return false;
+
+  if (/^[^a-zA-Z]+$/.test(trimmed)) return false;
+
+  if (/^(.)\1{4,}$/.test(trimmed)) return false;
+
+  return true;
+};
+
+const isValidUrl = (url: string) => {
+  try {
+    const parsed = new URL(url.trim());
+
+    return (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:"
+    );
+  } catch {
+    return false;
+  }
 };
 
 // --- Drag and Drop Wrappers ---
@@ -53,7 +195,9 @@ function SortableColumn({ id, children }: { id: string; children: React.ReactNod
       {children}
     </div>
   );
+
 }
+
 
 function SortableCard({ job, onClick, isOverdue }: { job: JobApplication; onClick: () => void; isOverdue: boolean }) {
   const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({
@@ -106,10 +250,12 @@ export default function JobTrackerPage({ jobs, sessions, onAddJob, onUpdateJob }
   const [selectedJob, setSelectedJob] = useState<JobApplication | null>(null);
   const [draftJob, setDraftJob] = useState<JobApplication | null>(null);
   const [savingDraft, setSavingDraft] = useState(false);
+  const [deletingJob, setDeletingJob] = useState(false);
   const [form, setForm] = useState({ companyName: "", jobTitle: "", jobUrl: "", status: "Applied" as Status });
   const { toast } = useToast();
 
   // Optimistic jobs state for DnD
+  const [jobRoleOpen, setJobRoleOpen] = useState(false);
   const [localJobs, setLocalJobs] = useState<JobApplication[]>(jobs);
   const localJobsRef = useRef(jobs);
   const [activeJob, setActiveJob] = useState<JobApplication | null>(null);
@@ -145,6 +291,32 @@ export default function JobTrackerPage({ jobs, sessions, onAddJob, onUpdateJob }
   );
 
   const handleAdd = async () => {
+    if (!isValidCompany(form.companyName)) {
+      toast({
+        title: "Invalid company name",
+        description: "Please enter a valid company name.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!JOB_ROLES.includes(form.jobTitle)) {
+      toast({
+        title: "Invalid job title",
+        description: "Please select a valid job role.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!isValidUrl(form.jobUrl)) {
+      toast({
+        title: "Invalid job URL",
+        description: "Please enter a valid application URL.",
+        variant: "destructive",
+      });
+      return;
+    }
     try {
       const job = await onAddJob({
         companyName: form.companyName,
@@ -222,6 +394,34 @@ export default function JobTrackerPage({ jobs, sessions, onAddJob, onUpdateJob }
       });
     } finally {
       setSavingDraft(false);
+    }
+  };
+
+  const handleDeleteJob = async (jobId: string) => {
+    if (!confirm("Are you sure you want to delete this job application?")) return;
+    setDeletingJob(true);
+    try {
+      await apiRequest(`/api/users/${userId}/jobs/${jobId}`, {
+        method: "DELETE",
+      });
+      
+      const pIdx = jobs.findIndex((j) => j.id === jobId);
+      if (pIdx !== -1) jobs.splice(pIdx, 1);
+      
+      setLocalJobs((prev) => prev.filter((j) => j.id !== jobId));
+      if (selectedJob?.id === jobId) {
+        setSelectedJob(null);
+        setDraftJob(null);
+      }
+      toast({ title: "Deleted", description: "Job application has been removed." });
+    } catch (error) {
+      toast({
+        title: "Unable to delete application",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setDeletingJob(false);
     }
   };
 
@@ -374,11 +574,59 @@ export default function JobTrackerPage({ jobs, sessions, onAddJob, onUpdateJob }
                   </div>
                   <div>
                     <Label>Job Title</Label>
-                    <Input value={form.jobTitle} onChange={(e) => setForm({ ...form, jobTitle: e.target.value })} className="mt-1 bg-secondary/50" />
+
+                    <Popover open={jobRoleOpen} onOpenChange={setJobRoleOpen}>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          role="combobox"
+                          className="w-full mt-1 justify-between bg-secondary/50"
+                        >
+                          {form.jobTitle || "Select a job role"}
+                          <ChevronsUpDown className="ml-2 h-4 w-4 opacity-50" />
+                        </Button>
+                      </PopoverTrigger>
+
+                      <PopoverContent className="w-full p-0">
+                        <Command>
+                          <CommandInput placeholder="Search job role..." />
+                          <CommandEmpty>No job role found.</CommandEmpty>
+
+                          <CommandGroup className="max-h-64 overflow-y-auto">
+                            {JOB_ROLES.map((role) => (
+                              <CommandItem
+                                key={role}
+                                value={role}
+                                onSelect={() => {
+                                  setForm({ ...form, jobTitle: role });
+                                  setJobRoleOpen(false);
+                                }}
+                              >
+                                <Check
+                                  className={`mr-2 h-4 w-4 ${form.jobTitle === role
+                                    ? "opacity-100"
+                                    : "opacity-0"
+                                    }`}
+                                />
+                                {role}
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                   <div>
                     <Label>Job URL</Label>
-                    <Input value={form.jobUrl} onChange={(e) => setForm({ ...form, jobUrl: e.target.value })} className="mt-1 bg-secondary/50" />
+                    <Input
+                      type="url"
+                      placeholder="https://company.com/job"
+                      value={form.jobUrl}
+                      onChange={(e) =>
+                        setForm({ ...form, jobUrl: e.target.value })
+                      }
+                      className="mt-1 bg-secondary/50"
+                    />
                   </div>
                   <div>
                     <Label>Status</Label>
@@ -484,12 +732,15 @@ export default function JobTrackerPage({ jobs, sessions, onAddJob, onUpdateJob }
                 <Label>Notes</Label>
                 <Textarea value={draftJob.notes} onChange={(e) => setDraftJob({ ...draftJob, notes: e.target.value })} className="mt-1 bg-secondary/50" rows={4} />
               </div>
-              <div className="flex gap-3">
-                <Button onClick={saveDraftJob} disabled={savingDraft} className="gradient-primary text-primary-foreground">
+              <div className="flex gap-3 mt-4">
+                <Button onClick={saveDraftJob} disabled={savingDraft || deletingJob} className="gradient-primary text-primary-foreground">
                   {savingDraft ? "Saving..." : "Save Changes"}
                 </Button>
-                <Button type="button" variant="outline" onClick={() => setDraftJob(selectedJob)}>
+                <Button type="button" variant="outline" onClick={() => setDraftJob(selectedJob)} disabled={savingDraft || deletingJob}>
                   Reset
+                </Button>
+                <Button type="button" variant="destructive" onClick={() => handleDeleteJob(draftJob.id)} disabled={savingDraft || deletingJob}>
+                  {deletingJob ? "Deleting..." : "Delete"}
                 </Button>
               </div>
             </div>
