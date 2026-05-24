@@ -40,21 +40,16 @@ export default function AuthPage({ mode, onLogin, onSignup }: AuthPageProps) {
 
   // Full name validation
   const handleNameChange = (value: string) => {
+    setName(value);
+
     const regex = /^[A-Za-z\s]+$/;
 
-    // Allow clearing input
     if (value === "") {
-      setName(value);
       setNameError("");
-      return;
-    }
-
-    // Allow only alphabets and spaces
-    if (regex.test(value)) {
-      setName(value);
-      setNameError("");
-    } else {
+    } else if (!regex.test(value)) {
       setNameError("Full Name can only contain alphabets and spaces");
+    } else {
+      setNameError("");
     }
   };
 
