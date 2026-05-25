@@ -349,20 +349,14 @@ export default function AuthPage({ mode, onLogin, onSignup }: AuthPageProps) {
                             const strength =
                               score <= 2
                                 ? {
-                                    label: "Weak",
-                                    color: "bg-red-500",
-                                    width: "33%",
+                                    label: "Weak",                                  
                                   }
                                 : score <= 4
                                 ? {
                                     label: "Medium",
-                                    color: "bg-yellow-500",
-                                    width: "66%",
                                   }
                                 : {
                                     label: "Strong",
-                                    color: "bg-green-500",
-                                    width: "100%",
                                   };
 
                             return (
