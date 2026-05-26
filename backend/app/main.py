@@ -80,6 +80,9 @@ OPENROUTER_APP_URL = os.getenv(
 )
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "PrepIQ")
 OPENROUTER_TIMEOUT_SECONDS = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -529,23 +532,34 @@ def stable_number(seed: str, minimum: int, maximum: int) -> int:
 async def call_openrouter_json(
     system_prompt: str, user_prompt: str, client: httpx.AsyncClient | None = None
 ) -> dict[str, Any]:
-    if not OPENROUTER_API_KEY:
-        raise OpenRouterError("OpenRouter is not configured")
+    if GEMINI_API_KEY:
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        model = GEMINI_MODEL
+        headers = {
+            "Authorization": f"Bearer {GEMINI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        provider_name = "Gemini"
+    else:
+        if not OPENROUTER_API_KEY:
+            raise OpenRouterError("No API key configured (neither Gemini nor OpenRouter)")
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        model = OPENROUTER_MODEL
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": OPENROUTER_APP_URL,
+            "X-Title": OPENROUTER_APP_NAME,
+        }
+        provider_name = "OpenRouter"
 
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": model,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-    }
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": OPENROUTER_APP_URL,
-        "X-Title": OPENROUTER_APP_NAME,
     }
 
     max_retries = 3
@@ -563,7 +577,7 @@ async def call_openrouter_json(
 
             try:
                 response = await local_client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
+                    url,
                     json=payload,
                     headers=headers,
                 )
@@ -580,8 +594,9 @@ async def call_openrouter_json(
                         backoff = 2**attempt
 
                     logger.warning(
-                        "OpenRouter returned status %d. Retrying in %ds "
+                        "%s returned status %d. Retrying in %ds "
                         "(attempt %d/%d)...",
+                        provider_name,
                         response.status_code,
                         backoff,
                         attempt + 1,
@@ -591,7 +606,7 @@ async def call_openrouter_json(
                     continue
                 else:
                     raise OpenRouterError(
-                        f"OpenRouter request failed with status {response.status_code} "
+                        f"{provider_name} request failed with status {response.status_code} "
                         f"after {max_retries} retries"
                     )
 
@@ -600,19 +615,30 @@ async def call_openrouter_json(
             break
         except httpx.HTTPStatusError as exc:
             raise OpenRouterError(
-                f"OpenRouter request failed: {exc.response.status_code} {exc.response.text}"
+                f"{provider_name} request failed: {exc.response.status_code} {exc.response.text}"
             ) from exc
         except httpx.RequestError as exc:
-            raise OpenRouterError(f"OpenRouter connection failed: {exc}") from exc
+            raise OpenRouterError(f"{provider_name} connection failed: {exc}") from exc
 
     if not body:
-        raise OpenRouterError("OpenRouter request failed to return a response body")
+        raise OpenRouterError(f"{provider_name} request failed to return a response body")
 
     try:
-        content = body["choices"][0]["message"]["content"]
+        raw_content = body["choices"][0]["message"]["content"]
+        if raw_content is None:
+            raise OpenRouterError(f"{provider_name} returned empty message content")
+        content = raw_content.strip()
+        # Clean markdown code blocks if the LLM wrapped the JSON response
+        if content.startswith("```"):
+            # Strip leading ```json or ``` and optional newline
+            content = re.sub(r"^```(?:json)?\s*\n?", "", content)
+            # Strip trailing ```
+            content = re.sub(r"\n?\s*```$", "", content)
+            content = content.strip()
         return json.loads(content)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise OpenRouterError("OpenRouter returned an invalid response format") from exc
+        raise OpenRouterError(f"{provider_name} returned an invalid response format") from exc
+
 
 
 async def generate_session_payload(
@@ -645,10 +671,58 @@ async def generate_session_payload(
             ),
             client=client,
         )
-        gap_analysis = [GapItem(**item) for item in response["gapAnalysis"]]
-        readiness = max(0, min(100, int(response["readinessScore"])))
-        question_bank = [QuestionItem(**item) for item in response["questionBank"]]
-        roadmap = [RoadmapDay(**item) for item in response["roadmap"]]
+        # Standardize keys by mapping case-insensitive options
+        if isinstance(response, list) and len(response) > 0:
+            response = response[0]
+        if not isinstance(response, dict):
+            response = {}
+        norm_res = {k.lower(): v for k, v in response.items()}
+
+        # Helper to normalize dict keys to match Pydantic expectations
+        def norm_dict(d, mapping):
+            if not isinstance(d, dict):
+                return d
+            norm = {}
+            lowered = {k.lower().replace("_", ""): v for k, v in d.items()}
+            for model_k, alternate_keys in mapping.items():
+                val = None
+                for alt in alternate_keys:
+                    if alt in lowered:
+                        val = lowered[alt]
+                        break
+                norm[model_k] = val
+            return norm
+
+        gap_mapping = {
+            "skill": ["skill", "name"],
+            "have": ["have", "current"],
+            "need": ["need", "required"],
+            "gapLevel": ["gaplevel", "level", "gap"]
+        }
+        q_mapping = {
+            "question": ["question", "text"],
+            "type": ["type", "category"],
+            "difficulty": ["difficulty", "level"],
+            "tip": ["tip", "hint"]
+        }
+        roadmap_mapping = {
+            "day": ["day", "number"],
+            "focusArea": ["focusarea", "area", "focus"],
+            "tasks": ["tasks", "todo"]
+        }
+
+        raw_gap = norm_res.get("gapanalysis", [])
+        gap_analysis = [GapItem(**norm_dict(item, gap_mapping)) for item in raw_gap if isinstance(item, dict)]
+
+        readiness_val = norm_res.get("readinessscore", norm_res.get("readiness", 50))
+        readiness = max(0, min(100, int(readiness_val)))
+
+        raw_questions = norm_res.get("questionbank", [])
+        question_bank = [QuestionItem(**norm_dict(item, q_mapping)) for item in raw_questions if isinstance(item, dict)]
+
+        raw_roadmap = norm_res.get("roadmap", [])
+        roadmap = [RoadmapDay(**norm_dict(item, roadmap_mapping)) for item in raw_roadmap if isinstance(item, dict)]
+
         if len(roadmap) >= 1 and len(question_bank) >= 1 and len(gap_analysis) >= 1:
             return gap_analysis, readiness, question_bank, roadmap
     except (OpenRouterError, KeyError, TypeError, ValueError) as exc:
@@ -848,12 +922,26 @@ async def evaluate_mock_attempt(
             ),
             client=client,
         )
-        score = max(1, min(10, int(response["aiScore"])))
+        # Standardize keys by mapping case-insensitive options
+        if isinstance(response, list) and len(response) > 0:
+            response = response[0]
+        if not isinstance(response, dict):
+            response = {}
+        norm_res = {k.lower(): v for k, v in response.items()}
+
+        score_val = norm_res.get("aiscore", norm_res.get("score", 7))
+        score = max(1, min(10, int(score_val)))
+
+        strengths = norm_res.get("strengths", ["Attempted to answer"])
+        missing = norm_res.get("missing", norm_res.get("areas to improve", norm_res.get("weaknesses", [])))
+        model_answer = norm_res.get("modelanswer", norm_res.get("model_answer", "Practice structured responses using STAR method."))
+        verdict = norm_res.get("onelineverdict", norm_res.get("verdict", "Basic response submitted."))
+
         feedback = MockFeedback(
-            strengths=[str(item) for item in response["strengths"]],
-            missing=[str(item) for item in response["missing"]],
-            modelAnswer=str(response["modelAnswer"]),
-            oneLineVerdict=str(response["oneLineVerdict"]),
+            strengths=[str(item) for item in strengths] if isinstance(strengths, list) else [str(strengths)],
+            missing=[str(item) for item in missing] if isinstance(missing, list) else [str(missing)],
+            modelAnswer=str(model_answer),
+            oneLineVerdict=str(verdict),
             confidenceAnalysis=confidence,
         )
         if feedback.strengths and feedback.missing:
