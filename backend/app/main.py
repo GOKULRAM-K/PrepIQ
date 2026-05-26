@@ -80,6 +80,9 @@ OPENROUTER_APP_URL = os.getenv(
 )
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "PrepIQ")
 OPENROUTER_TIMEOUT_SECONDS = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -529,23 +532,34 @@ def stable_number(seed: str, minimum: int, maximum: int) -> int:
 async def call_openrouter_json(
     system_prompt: str, user_prompt: str, client: httpx.AsyncClient | None = None
 ) -> dict[str, Any]:
-    if not OPENROUTER_API_KEY:
-        raise OpenRouterError("OpenRouter is not configured")
+    if GEMINI_API_KEY:
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        model = GEMINI_MODEL
+        headers = {
+            "Authorization": f"Bearer {GEMINI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        provider_name = "Gemini"
+    else:
+        if not OPENROUTER_API_KEY:
+            raise OpenRouterError("No API key configured (neither Gemini nor OpenRouter)")
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        model = OPENROUTER_MODEL
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": OPENROUTER_APP_URL,
+            "X-Title": OPENROUTER_APP_NAME,
+        }
+        provider_name = "OpenRouter"
 
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": model,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-    }
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": OPENROUTER_APP_URL,
-        "X-Title": OPENROUTER_APP_NAME,
     }
 
     max_retries = 3
@@ -563,7 +577,7 @@ async def call_openrouter_json(
 
             try:
                 response = await local_client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
+                    url,
                     json=payload,
                     headers=headers,
                 )
@@ -580,8 +594,9 @@ async def call_openrouter_json(
                         backoff = 2**attempt
 
                     logger.warning(
-                        "OpenRouter returned status %d. Retrying in %ds "
+                        "%s returned status %d. Retrying in %ds "
                         "(attempt %d/%d)...",
+                        provider_name,
                         response.status_code,
                         backoff,
                         attempt + 1,
@@ -591,7 +606,7 @@ async def call_openrouter_json(
                     continue
                 else:
                     raise OpenRouterError(
-                        f"OpenRouter request failed with status {response.status_code} "
+                        f"{provider_name} request failed with status {response.status_code} "
                         f"after {max_retries} retries"
                     )
 
@@ -600,18 +615,18 @@ async def call_openrouter_json(
             break
         except httpx.HTTPStatusError as exc:
             raise OpenRouterError(
-                f"OpenRouter request failed: {exc.response.status_code} {exc.response.text}"
+                f"{provider_name} request failed: {exc.response.status_code} {exc.response.text}"
             ) from exc
         except httpx.RequestError as exc:
-            raise OpenRouterError(f"OpenRouter connection failed: {exc}") from exc
+            raise OpenRouterError(f"{provider_name} connection failed: {exc}") from exc
 
     if not body:
-        raise OpenRouterError("OpenRouter request failed to return a response body")
+        raise OpenRouterError(f"{provider_name} request failed to return a response body")
 
     try:
         raw_content = body["choices"][0]["message"]["content"]
         if raw_content is None:
-            raise OpenRouterError("OpenRouter returned empty message content")
+            raise OpenRouterError(f"{provider_name} returned empty message content")
         content = raw_content.strip()
         # Clean markdown code blocks if the LLM wrapped the JSON response
         if content.startswith("```"):
@@ -622,7 +637,8 @@ async def call_openrouter_json(
             content = content.strip()
         return json.loads(content)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise OpenRouterError("OpenRouter returned an invalid response format") from exc
+        raise OpenRouterError(f"{provider_name} returned an invalid response format") from exc
+
 
 
 async def generate_session_payload(
