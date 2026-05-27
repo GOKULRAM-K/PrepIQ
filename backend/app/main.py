@@ -25,7 +25,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -354,6 +354,13 @@ class CreateInterviewSessionRequest(BaseModel):
     company: str
     jdText: str = ""
     resumeText: str = ""
+
+    @field_validator("jobTitle", "company", mode="after")
+    @classmethod
+    def check_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("cannot be empty or whitespace-only")
+        return v
 
 
 class ConfidenceAnalysis(BaseModel):
@@ -1282,17 +1289,6 @@ async def create_session(
     _: UserTable = Depends(require_current_user),
     db: Session = Depends(get_db),
 ) -> InterviewSession:
-    if not payload.jobTitle.strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="jobTitle cannot be empty or whitespace-only",
-        )
-    if not payload.company.strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="company cannot be empty or whitespace-only",
-        )
-
     client = getattr(request.app.state, "httpx_client", None)
     gap_analysis, readiness, question_bank, roadmap = await generate_session_payload(
         payload.jobTitle,
